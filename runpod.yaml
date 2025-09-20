@@ -1,0 +1,11 @@
+name: stylesnap-clip
+entrypoint: handler.py
+handler: handler
+python:
+  version: "3.11"
+  requirements:
+    - torch
+    - transformers
+    - pillow
+    - firebase-admin
+    - numpy
