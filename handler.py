@@ -1,9 +1,10 @@
-# handler.py — RunPod GPU handler for StyleSnap
+ï»¿# handler.py â€” RunPod GPU handler for StyleSnap
 import os, json, numpy as np, torch
 from PIL import Image
 import firebase_admin
 from firebase_admin import credentials, firestore
 from transformers import CLIPModel, CLIPProcessor
+import runpod  # <-- NEW
 
 # ---------------- Firestore init ----------------
 cred = None
@@ -68,7 +69,7 @@ def handler(event):
     query = (data.get("message") or "").strip()
     top_k = int(data.get("top_k") or 8)
     if not query:
-        return {"reply": "Tell me what you’re looking for.", "items": []}
+        return {"reply": "Tell me what youâ€™re looking for.", "items": []}
     arr, items = _load_products()
     if not arr.size or not items:
         return {"reply": "Database is empty.", "items": []}
@@ -76,3 +77,6 @@ def handler(event):
     idxs, sims = _cosine_topk(q, arr, k=min(top_k, len(items)))
     cands = [items[i] for i in idxs]
     return {"reply": f"Here are some results for '{query}'.", "items": cands}
+
+# Start RunPod serverless loop
+runpod.serverless.start({"handler": handler})

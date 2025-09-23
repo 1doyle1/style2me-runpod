@@ -4,3 +4,4 @@ firebase-admin==6.3.0
 google-cloud-firestore==2.16.0
 pillow==9.5.0
 numpy==1.26.4
+runpod
