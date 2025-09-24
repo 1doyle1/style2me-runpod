@@ -60,6 +60,23 @@ def llm_complete(messages: List[Dict[str, str]], tools: List[Dict[str, Any]] | N
         kwargs["tool_choice"] = "auto"
     return client.chat.completions.create(**kwargs)
 
+def _tc_to_dict(tc):
+    # Convert SDK tool_call object into the raw dict format OpenAI expects
+    # Handles both pydantic-like objects and dicts
+    try:
+        fn = getattr(tc, "function", None)
+        return {
+            "id": getattr(tc, "id", None) or tc.get("id"),
+            "type": getattr(tc, "type", None) or tc.get("type") or "function",
+            "function": {
+                "name": getattr(fn, "name", None) or (fn.get("name") if isinstance(fn, dict) else None),
+                "arguments": getattr(fn, "arguments", None) or (fn.get("arguments") if isinstance(fn, dict) else "{}"),
+            },
+        }
+    except Exception:
+        # Best-effort fallback; don't crash the flow
+        return {"id": getattr(tc, "id", None), "type": "function", "function": {"name": "unknown", "arguments": "{}"}}
+
 def run(messages: List[Dict[str, str]]) -> Tuple[str, List[Dict[str, Any]]]:
     tools = [{
         "type": "function",
@@ -80,34 +97,38 @@ def run(messages: List[Dict[str, str]]) -> Tuple[str, List[Dict[str, Any]]]:
 
     sys = {"role": "system", "content": SYSTEM_PROMPT}
 
-    # First pass
+    # -------- First pass: let the model decide about tool use --------
     r1 = llm_complete([sys, *messages], tools=tools)
     choice = r1.choices[0]
     msg = getattr(choice, "message", None)
 
-    if not msg or getattr(msg, "tool_calls", None) in (None, []):
+    # If no tool calls → just return the assistant's text
+    if not msg or not getattr(msg, "tool_calls", None):
         text = (getattr(msg, "content", None) or getattr(choice, "text", None) or "Got it.").strip()
         return text, []
 
-    # Handle tool calls
-    tool_calls = msg.tool_calls or []
-    items: List[Dict[str, Any]] = []
-    follow_messages: List[Dict[str, str]] = [sys, *messages]
+    # -------- Prepare second pass context --------
+    tool_calls_raw = [ _tc_to_dict(tc) for tc in (msg.tool_calls or []) if tc ]
+    # CRITICAL: include the assistant message *with tool_calls* before any tool replies
+    follow_messages: List[Dict[str, Any]] = [sys, *messages, {
+        "role": "assistant",
+        "content": (msg.content or ""),  # often empty when it’s a pure tool call
+        "tool_calls": tool_calls_raw
+    }]
 
-    for call in tool_calls:
+    # -------- Execute tools and append tool messages --------
+    items: List[Dict[str, Any]] = []
+    for tc in tool_calls_raw:
         try:
-            if getattr(call, "type", "") != "function":
-                continue
-            fn = call.function
-            name = getattr(fn, "name", "")
-            argstr = getattr(fn, "arguments", "") or "{}"
+            fn_name = (tc.get("function") or {}).get("name")
+            argstr  = (tc.get("function") or {}).get("arguments") or "{}"
             try:
                 args = json.loads(argstr)
             except Exception:
                 last_user = next((m["content"] for m in reversed(messages) if m.get("role")=="user" and m.get("content")), "")
                 args = {"query": last_user, "top_k": 8, "filters": {}}
 
-            if name == "search_similar":
+            if fn_name == "search_similar":
                 q = (args.get("query") or "").strip()
                 top_k = int(args.get("top_k") or 8)
                 filters = args.get("filters") or {}
@@ -117,33 +138,34 @@ def run(messages: List[Dict[str, str]]) -> Tuple[str, List[Dict[str, Any]]]:
 
                 try:
                     items = tool_search_similar(q, top_k=top_k, filters=filters) or []
+                    print(f"[run] tool_search_similar query='{q}' → {len(items)} items", flush=True)
                 except Exception as e:
-                    print("[agent] tool_search_similar failed:", repr(e))
+                    print("[run] tool_search_similar failed:", repr(e), flush=True)
                     items = []
 
-                # ✅ Only append tool role if assistant actually gave tool_calls + id
-                if getattr(call, "id", None) and getattr(msg, "tool_calls", None):
+                # Append the tool response tied to the exact tool_call id
+                if tc.get("id"):
                     tool_payload = {"ok": True, "query": q, "count": len(items), "items": items}
                     follow_messages.append({
                         "role": "tool",
-                        "tool_call_id": call.id,
+                        "tool_call_id": tc["id"],
                         "name": "search_similar",
                         "content": json.dumps(tool_payload, default=str)
                     })
-                else:
-                    print("[agent] Skipping tool message append — no valid tool_call.id")
         except Exception as e:
-            print("[agent] tool_call handler error:", repr(e))
+            print("[run] tool_call handler error:", repr(e), flush=True)
 
-    # Debug log payload before second pass
-    print("[DEBUG] follow_messages before second pass:")
-    pprint.pprint(follow_messages)
-
-    # Second pass
+    # -------- Second pass: ask the model to summarize/answer using the tool results --------
     try:
+        import pprint
+        print("[DEBUG] follow_messages before second pass:")
+        pprint.pprint(follow_messages)
+
         r2 = llm_complete(follow_messages, tools=None)
         text = (r2.choices[0].message.content or "Here are some ideas.").strip()
+        print("[run] final reply:", text, flush=True)
     except Exception as e:
-        print("[agent] second completion failed:", repr(e))
+        print("[run] second completion failed:", repr(e), flush=True)
         text = "Here are some ideas."
     return text, items
+
