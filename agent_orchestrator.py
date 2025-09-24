@@ -1,5 +1,5 @@
 ﻿from __future__ import annotations
-import json, os, re
+import json, os, re, pprint
 from typing import Any, Dict, List, Tuple
 from openai import OpenAI
 
@@ -20,7 +20,7 @@ client = _load_openai_client()
 SYSTEM_PROMPT = """You are StyleSnap — a friendly assistant who can also help with fashion.
 Keep replies short (1–4 sentences). Only search products when the user clearly wants items."""
 
-# -------- simple keyword fallback (works when ML embeddings are off) --------
+# -------- simple keyword fallback --------
 def _simple_keyword_search(query: str, items: List[Dict[str, Any]], top_k: int, filters: Dict[str, Any]):
     q = (query or "").lower().strip()
     if not q or not items:
@@ -40,14 +40,12 @@ def tool_search_similar(query: str, top_k: int = 8, filters: Dict[str, Any] | No
     filters = filters or {}
     arr, items = _load_products()
 
-    # try embeddings first
     q = _embed_text(query or "")
     if q is not None and getattr(arr, "size", 0):
         idxs, sims = _cosine_topk(q, arr, k=max(top_k*3, top_k))
         cands = [items[i] for i in idxs]
         return _apply_filters(cands, [float(s) for s in sims], filters)[:top_k]
 
-    # fallback if ML disabled / no vectors
     return _simple_keyword_search(query or "", items, top_k, filters)
 
 def llm_complete(messages: List[Dict[str, str]], tools: List[Dict[str, Any]] | None = None):
@@ -82,7 +80,7 @@ def run(messages: List[Dict[str, str]]) -> Tuple[str, List[Dict[str, Any]]]:
 
     sys = {"role": "system", "content": SYSTEM_PROMPT}
 
-    # First pass: decide whether to call the tool
+    # First pass
     r1 = llm_complete([sys, *messages], tools=tools)
     choice = r1.choices[0]
     msg = getattr(choice, "message", None)
@@ -123,8 +121,8 @@ def run(messages: List[Dict[str, str]]) -> Tuple[str, List[Dict[str, Any]]]:
                     print("[agent] tool_search_similar failed:", repr(e))
                     items = []
 
-                # ✅ Only append tool message if call.id exists
-                if getattr(call, "id", None):
+                # ✅ Only append tool role if assistant actually gave tool_calls + id
+                if getattr(call, "id", None) and getattr(msg, "tool_calls", None):
                     tool_payload = {"ok": True, "query": q, "count": len(items), "items": items}
                     follow_messages.append({
                         "role": "tool",
@@ -132,10 +130,16 @@ def run(messages: List[Dict[str, str]]) -> Tuple[str, List[Dict[str, Any]]]:
                         "name": "search_similar",
                         "content": json.dumps(tool_payload, default=str)
                     })
+                else:
+                    print("[agent] Skipping tool message append — no valid tool_call.id")
         except Exception as e:
             print("[agent] tool_call handler error:", repr(e))
 
-    # Second pass: verbalize results
+    # Debug log payload before second pass
+    print("[DEBUG] follow_messages before second pass:")
+    pprint.pprint(follow_messages)
+
+    # Second pass
     try:
         r2 = llm_complete(follow_messages, tools=None)
         text = (r2.choices[0].message.content or "Here are some ideas.").strip()
