@@ -123,13 +123,15 @@ def run(messages: List[Dict[str, str]]) -> Tuple[str, List[Dict[str, Any]]]:
                     print("[agent] tool_search_similar failed:", repr(e))
                     items = []
 
-                tool_payload = {"ok": True, "query": q, "count": len(items), "items": items}
-                follow_messages.append({
-                    "role": "tool",
-                    "tool_call_id": call.id,
-                    "name": "search_similar",
-                    "content": json.dumps(tool_payload, default=str)
-                })
+                # ✅ Only append tool message if call.id exists
+                if getattr(call, "id", None):
+                    tool_payload = {"ok": True, "query": q, "count": len(items), "items": items}
+                    follow_messages.append({
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "name": "search_similar",
+                        "content": json.dumps(tool_payload, default=str)
+                    })
         except Exception as e:
             print("[agent] tool_call handler error:", repr(e))
 
